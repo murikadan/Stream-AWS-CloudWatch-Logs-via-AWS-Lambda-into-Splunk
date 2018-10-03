@@ -1,0 +1,228 @@
+{
+    "AWSTemplateFormatVersion" : "2010-09-09",
+    "Description"              : "Template to set up and enable VPC Flow Logs",
+    "Parameters"               : {
+        "VpcId": {
+            "Type": "String",
+			"Description" : "ID of an existing VPC where logging need to be configured"
+        },
+		"BucketName": {
+            "Type": "String",
+			"Description" : "S3 bucket name where lambda function zip must exist"
+        },
+        "RetentionInDays": {
+            "Type": "Number",
+            "Default": 30,
+            "AllowedValues": [
+                1,
+                7,
+                30,
+                365
+            ]
+        },
+        "TrafficType": {
+            "Description": "The type of traffic to log.",
+            "Type": "String",
+            "Default": "ALL",
+            "AllowedValues": [
+                "ACCEPT",
+                "REJECT",
+                "ALL"
+            ]
+        }
+    },
+
+    "Resources"                : {
+        "VPCFlowLogRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "vpc-flow-logs.amazonaws.com"
+                                ]
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": "flowlogs-policy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents",
+                                        "logs:DescribeLogGroups",
+                                        "logs:DescribeLogStreams"
+                                    ],
+                                    "Resource": "*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "LogGroup": {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+                         "LogGroupName" :{
+                    "Fn::Join" : [
+                        "",
+                        [
+                            "VPC_FlowLogs-",
+                            {
+                                "Ref" : "VpcId"
+                            }
+                        ]
+                    ]
+                },
+                "RetentionInDays": {
+                    "Ref": "RetentionInDays"
+                }
+            }
+        },
+        "FlowLog": {
+            "Type": "AWS::EC2::FlowLog",
+            "Properties": {
+                "DeliverLogsPermissionArn": {
+                    "Fn::GetAtt": [
+                        "VPCFlowLogRole",
+                        "Arn"
+                    ]
+                },
+                "LogGroupName": {
+                    "Ref": "LogGroup"
+                },
+                "ResourceId": {
+                    "Ref": "VpcId"
+                },
+                "ResourceType": "VPC",
+                "TrafficType": {
+                    "Ref": "TrafficType"
+                }
+            }
+        },
+        "LambdaVPCExecutionRole" : {
+            "Type" : "AWS::IAM::Role",
+            "Properties" : {
+                "AssumeRolePolicyDocument" : {
+                    "Version" : "2012-10-17",
+                    "Statement" : [
+                        {
+                            "Sid" : "",
+                            "Effect" : "Allow",
+                            "Principal" : {
+                                "Service" : "lambda.amazonaws.com"
+                            },
+                            "Action"    : "sts:AssumeRole"
+                        }
+                    ]
+                },
+                "Path"                     : "/",
+                "Policies"                 : [
+                    {
+                        "PolicyName" : "CloudwatchToSplunk",
+                        "PolicyDocument" : {
+                            "Version" : "2012-10-17",
+                            "Statement" : [
+                                {
+                                    "Effect" : "Allow",
+                                    "Action" : [
+                                        "logs:*"
+                                    ],
+                                    "Resource" : "arn:aws:logs:*:*:*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "CloudwatchToSplunk"      : {
+          "Type" : "AWS::Lambda::Function",
+          "Properties": {
+            "Code": {
+				  "S3Bucket" : {
+                    "Ref": "BucketName"
+				  },
+				  "S3Key" : "splunk-cloudwatch-logs-processor.zip"
+            },
+            "Handler": "index.handler",
+			"Description": "Lambda function to publish cloudwatch events to Splunk HTTP collector",
+            "Runtime": "nodejs6.10",
+			"Environment": {
+				"Variables" : { 
+					"SPLUNK_HEC_URL":"https://REPLACE_ME_WITH_CORRECT_VALUE_BEFORE_DELPOYING:8088", 
+					"SPLUNK_HEC_TOKEN":"REPLACE_ME_WITH_ACTUAL_TOKEN_BEFORE_DEPLOYING"
+					}
+			},
+			"MemorySize": 512,
+            "Timeout": "10",
+            "Role": {
+              "Fn::GetAtt": [
+                "LambdaVPCExecutionRole",
+                "Arn"
+              ]
+            }
+          }
+        },
+	"LambdaInvokePermission": {
+		"Type": "AWS::Lambda::Permission",
+		"Properties": {
+			"FunctionName": {
+				"Fn::GetAtt": [
+					"CloudwatchToSplunk",
+					"Arn"
+			]
+		},
+		"Action": "lambda:InvokeFunction",
+		"Principal": "logs.amazonaws.com",
+		"SourceAccount": {
+			"Ref": "AWS::AccountId"
+		},
+		"SourceArn": {
+			"Fn::GetAtt": [
+				"LogGroup",
+				"Arn"
+			]
+		}
+	}
+	},
+		"SubscriptionFilter" : {
+		  "Type" : "AWS::Logs::SubscriptionFilter",
+		  "Properties" : {
+			"LogGroupName" : { "Ref" : "LogGroup" },
+			"FilterPattern" : "eni",
+			"DestinationArn" : { "Fn::GetAtt" : [ "CloudwatchToSplunk", "Arn" ] }
+		  }
+		}
+       },
+       "Outputs": {
+        "LogGroupName": {
+            "Description": "The name of the CloudWatch Logs log group where Amazon EC2 publishes your flow logs.",
+            "Value": {
+                "Ref": "LogGroup"
+            }
+        },
+        "LogGroupARN": {
+            "Description": "The ARN of the CloudWatch Logs log group where Amazon EC2 publishes your flow logs.",
+            "Value": {
+                "Fn::GetAtt": [
+                    "LogGroup",
+                    "Arn"
+                ]
+            }
+        }
+    }
+}
